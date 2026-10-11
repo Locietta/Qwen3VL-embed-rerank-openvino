@@ -26,11 +26,17 @@ target("qvl-core")
     add_packages("lighter", {public = true})
     add_packages("pcre2", "utf8proc", "stb")
 
+-- The model on OpenVINO.
+target("qvl-engine")
+    set_kind("static")
+    add_files("engine/*.cpp")
+    add_deps("qvl-core")
+    add_packages("openvino", {public = true})
+
 target("qvl-server")
     set_kind("binary")
     add_rules("utils.version.cpp")
     add_files("main.cpp")
-    add_deps("qvl-core")
-    add_packages("openvino")
+    add_deps("qvl-engine")
 
 includes("tests/xmake.lua")
