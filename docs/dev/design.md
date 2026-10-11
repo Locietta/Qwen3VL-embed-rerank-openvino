@@ -66,9 +66,29 @@ client ──HTTP──► lighter::http::Server (event loop thread)
     (1, 4, 16) under a token budget (8192). Padding rows hold one token so
     their attention is never empty. The model only ever sees these shapes, and
     `warm_up` compiles them all at load, which keeps GPU memory bounded.
-  - Dynamic quantization is off (`DYNAMIC_QUANTIZATION_GROUP_SIZE=0`). With it
-    on, the int8 vision merger changes its output by 2–13% for a 1e-6 change
-    in its input.
+  - Dynamic quantization is off for the vision encoder, whose int8 merger
+    changes its output by 2–13% for a 1e-6 change in its input. For the
+    language model it is a config switch (`dynamic_quantization_group`, off by
+    default). Group 32 gives ~35% more throughput at cosine ≥ 0.999; per-token
+    quantization is faster still but drifts to cosine 0.978.
+  - Vision-encoder outputs are cached by picture (a hash of the file's bytes)
+    in a byte-bounded LRU (512 MiB, ~256 pictures). The worker looks a picture
+    up before decoding it and pins the entry for the job, so a sticker that
+    comes back skips both decoding and the encoder.
+  - Prefix reuse (the reranker, `rerank_prefix_cache`): every pair of a rerank
+    request starts with the same system turn, instruction and query.
+    - The reranker's language model stays stateful. `split_prefix()` finds the
+      longest token prefix the pairs share, stopping before any document's
+      picture. `last_hidden_after()` runs it once, right-padded to a bucket,
+      then each batch of remainders with `beam_idx` all 0, so every row reads
+      the prefix's KV cache.
+    - Right padding, not left: a fully masked attention row can turn into NaN
+      in the cache.
+    - The KV cache is kept at f32 on CPU and f16 on GPU; the CPU plugin's
+      default u8 cache moved scores by ~0.01.
+    - Rerank of 24 texts: 3.70 s → 1.61 s. Of 24 cached pictures:
+      5.80 s → 3.81 s.
+    - Cost: the stateful model's buffers add ~2.6 GiB under varied load.
 - **`service/`**:
   - **Worker**: owns an Engine on a thread. A job is preprocessed there
     (decode, letterbox, prompt, tokens, truncation of the text to fit
@@ -109,8 +129,26 @@ binary links OpenVINO 2026.4, its GPU plugin and Intel's compute runtime
 driver: no container, no sudo. Models are exported on the host with
 `pixi run -e tools python tools/export.py embedding|reranker --out ~/services/qvl/models`.
 
+## Measured (2026-10-12, both models on the iGPU, Arrow Lake 245K)
+
+|                                         |               |
+| --------------------------------------- | ------------- |
+| Startup                                 | 5 s           |
+| Query (with instruction)                | 110 ms        |
+| Picture (not cached)                    | 260 ms        |
+| 32 short documents                      | 3.2 s         |
+| Rerank of 24 texts / 24 cached pictures | 1.6 s / 3.8 s |
+
+- Memory as cgroup shmem (the GPU's buffers): ~6.5 GiB for both models,
+  ~9–9.6 GiB with the stateful reranker under varied load.
+- The language model is compute-bound. Per-stage times are in `/metrics`.
+
 ## Next
 
+- Restore the prefix's KV state instead of rerunning it for each batch of a
+  rerank request (`query_state()` / `set_state()`).
+- A per-model switch for dynamic quantization (the reranker tolerates it
+  better than stored embeddings would).
 - NPU experiments: the static vision encoder and the reranker are candidates;
   a symmetric int8 export (`--sym`) and Intel's NPU user-space driver would be
   needed.
