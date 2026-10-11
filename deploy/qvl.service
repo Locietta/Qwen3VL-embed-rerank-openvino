@@ -1,0 +1,22 @@
+[Unit]
+Description=qvl: Qwen3-VL embedding and rerank service (OpenVINO, Intel iGPU)
+Wants=network-online.target
+After=network-online.target
+ConditionPathExists=%h/.config/qvl/config.json
+
+[Service]
+Type=simple
+ExecStart=%h/services/qvl/bin/current --config %h/.config/qvl/config.json
+# The Intel OpenCL driver comes from the deploy tree's Pixi environment; the
+# binary finds the libraries through its rpath, the ICD loader through this.
+Environment=OCL_ICD_VENDORS=%h/services/qvl/src/.pixi/envs/default/etc/OpenCL/vendors
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+UMask=0077
+# Both 2B models with every bucket compiled, plus headroom.
+MemoryMax=10G
+
+[Install]
+WantedBy=default.target

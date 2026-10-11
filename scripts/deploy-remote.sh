@@ -26,7 +26,8 @@ trap 'rm -rf -- "$incoming"' EXIT
 src="$root/src"
 mkdir -p "$src" "$root/bin" "$HOME/backups/qvl"
 # The source tree keeps its own Pixi environment: the installed binaries load
-# the GCC runtime, libuv and libcurl from it through their rpath.
+# the GCC runtime, OpenVINO and the Intel GPU runtime from it through their
+# rpath. Models live beside it in $root/models (tools/export.py).
 rsync --recursive --links --checksum --delete --delete-delay \
     --exclude=/.pixi/ --exclude=/.xmake/ --exclude='/build*/' \
     "$incoming/" "$src/"

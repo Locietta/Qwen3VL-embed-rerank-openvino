@@ -25,10 +25,11 @@ struct Options {
     std::string vision_device = "GPU";
     /// Compiled-blob cache; empty for none.
     std::filesystem::path cache_dir;
-    /// Sequence lengths a batch is padded to. The model only ever sees these.
-    std::vector<u32> length_buckets{64, 128, 256, 512, 1024, 2048};
+    /// Sequence lengths a batch is padded to. The model only ever sees these;
+    /// finer buckets waste less on padding and cost no memory.
+    std::vector<u32> length_buckets{32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048};
     /// Batch sizes a batch is padded to.
-    std::vector<u32> batch_buckets{1, 4, 16};
+    std::vector<u32> batch_buckets{1, 2, 4, 8, 12, 16};
     /// Largest batch x length the model runs at once.
     u32 max_batch_tokens = 8192;
     /// Side of the square every image is letterboxed to (multiple of 32).
@@ -36,7 +37,7 @@ struct Options {
     /// OpenVINO's activation quantization for int8 weights. Off by default: the
     /// int8 vision merger is numerically unstable with it.
     bool dynamic_quantization = false;
-    /// Compile every bucket shape at load time.
+    /// Run one text and one image at load time, so the first requests are fast.
     bool warm_up = true;
 };
 

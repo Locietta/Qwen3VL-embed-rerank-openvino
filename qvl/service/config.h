@@ -36,8 +36,8 @@ struct Config {
     u32 image_size = 256;
     /// Directories whose files may be named by "image": {"path": ...}.
     std::vector<std::string> image_roots;
-    std::vector<u32> length_buckets{64, 128, 256, 512, 1024, 2048};
-    std::vector<u32> batch_buckets{1, 4, 16};
+    std::vector<u32> length_buckets{32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048};
+    std::vector<u32> batch_buckets{1, 2, 4, 8, 12, 16};
     u32 max_batch_tokens = 8192;
     bool dynamic_quantization = false;
     usize max_body_bytes = 32 * 1024 * 1024;

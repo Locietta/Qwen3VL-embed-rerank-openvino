@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8091,
+  "models_dir": "~/services/qvl/models",
+  "cache_dir": "~/.cache/qvl/openvino",
+  "embedding": {
+    "name": "Qwen3-VL-Embedding-2B-int8",
+    "aliases": ["Qwen3-VL-Embedding-2B"],
+    "device": "GPU"
+  },
+  "reranker": {
+    "name": "Qwen3-VL-Reranker-2B-int8",
+    "aliases": ["Qwen3-VL-Reranker-2B"],
+    "device": "GPU"
+  },
+  "image_size": 256,
+  "image_roots": ["~/.local/share/lilia/stickers"]
+}

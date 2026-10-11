@@ -246,15 +246,12 @@ struct Engine::Self {
         return std::vector<float>(data, data + batch.size() * hidden);
     }
 
+    /// Runs one short text and one image, so the first requests do not pay for
+    /// compiling the graphs. Other shapes compile in milliseconds on first use,
+    /// and memory does not grow with their number (measured, 2026-10-11).
     void warm_up() {
-        for (const auto length : options.length_buckets) {
-            for (const auto rows : options.batch_buckets) {
-                if (rows > max_batch(length)) continue;
-                std::vector<Sequence> batch(rows, Sequence{.ids = std::vector<i32>(length, k_pad_token)});
-                run(batch);
-            }
-        }
-        // One image prompt, for the vision encoder and the deepstack shape.
+        std::vector<Sequence> text_batch{Sequence{.ids = std::vector<i32>(options.length_buckets.front(), k_pad_token)}};
+        run(text_batch);
         auto text = tokenizer.encode(prompt::embedding("", {.image_tokens = grid.tokens()}));
         image::Rgb blank{.width = options.image_size, .height = options.image_size};
         blank.pixels.assign(static_cast<usize>(blank.width) * blank.height * 3, 255);
