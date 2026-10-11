@@ -62,10 +62,11 @@ double dot(std::span<const float> a, std::span<const float> b) {
     return out;
 }
 
-engine::Engine load(engine::Kind kind, std::string_view name, std::string device) {
+engine::Engine load(engine::Kind kind, std::string_view name, std::string device, bool prefix_cache = false) {
     const auto started = std::chrono::steady_clock::now();
-    auto model =
-        engine::Engine::load(kind, {.dir = *model_dir(name), .language_device = device, .vision_device = device, .warm_up = false});
+    auto model = engine::Engine::load(
+        kind,
+        {.dir = *model_dir(name), .language_device = device, .vision_device = device, .warm_up = false, .prefix_cache = prefix_cache});
     require(model.has_value(), model ? "" : model.error());
     std::printf("loaded %.*s on %s in %.1fs\n", static_cast<int>(name.size()), name.data(), device.c_str(),
                 std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count());
@@ -150,7 +151,10 @@ void test_embeddings(const Fixtures &fixtures, const std::string &device, double
 
 /// Rerank scores match the OpenVINO reference.
 void test_rerank(const Fixtures &fixtures, const std::string &device, double tolerance) {
-    auto model = load(engine::Kind::RERANKER, k_reranker_model, device);
+    // Stateful, for prefix reuse; plain runs reset the state first.
+    auto model = load(engine::Kind::RERANKER, k_reranker_model, device, true);
+    std::vector<engine::Sequence> sequences;
+    std::vector<double> scores;
     const auto &cases = fixtures["rerank"];
     const auto &expected = fixtures["rerank_scores_ov"].get_array();
     const auto &query = cases["query"];
@@ -168,7 +172,21 @@ void test_rerank(const Fixtures &fixtures, const std::string &device, double tol
         const double want = expected[i].get_number();
         std::printf("  %s document %zu: score %.4f, reference %.4f\n", device.c_str(), i, score, want);
         require(std::abs(score - want) <= tolerance, std::format("{} document {}: score {} vs {}", device, i, score, want));
+        sequences.push_back(std::move(sequence));
+        scores.push_back(score);
     }
+
+    // The shared system/instruction/query prefix once, every document from its KV cache.
+    auto split = engine::split_prefix(sequences, 0, model.image_token());
+    require(split.has_value(), "the documents share a prefix");
+    auto after = model.last_hidden_after(split->prefix, split->rest);
+    require(after.has_value(), after ? "" : after.error());
+    for (usize k = 0; k < sequences.size(); ++k) {
+        const double score = 1 / (1 + std::exp(-dot(std::span(*after).subspan(k * model.hidden(), model.hidden()), model.rerank_head())));
+        require(std::abs(score - scores[k]) <= tolerance / 2,
+                std::format("{}: prefix reuse scores {} vs {} for document {}", device, score, scores[k], k));
+    }
+    std::printf("  %s: prefix reuse (%zu shared tokens) matches the full runs\n", device.c_str(), split->prefix.ids.size());
 }
 
 } // namespace

@@ -39,7 +39,10 @@ struct Config {
     std::vector<u32> length_buckets{32, 64, 96, 128, 160, 192, 256, 320, 384, 512, 768, 1024, 1536, 2048};
     std::vector<u32> batch_buckets{1, 2, 4, 8, 12, 16};
     u32 max_batch_tokens = 8192;
-    bool dynamic_quantization = false;
+    /// Dynamic quantization group of the language model's activations (0: off).
+    u64 dynamic_quantization_group = 0;
+    /// Run each rerank request's shared prefix (system, instruction, query) once.
+    bool rerank_prefix_cache = true;
     usize max_body_bytes = 32 * 1024 * 1024;
     usize max_inputs = 256;
     usize max_image_bytes = 16 * 1024 * 1024;

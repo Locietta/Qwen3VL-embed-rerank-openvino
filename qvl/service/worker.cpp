@@ -29,6 +29,8 @@ struct Pending {
     std::variant<EmbedJob, RerankJob> job;
     std::variant<EmbedSender, RerankSender> sender;
     std::vector<engine::Sequence> sequences;
+    /// Shared by every sequence, which then holds only its remainder (rerank).
+    std::optional<engine::Sequence> prefix;
     std::vector<float> hidden;
     usize remaining = 0;
     usize tokens = 0;
@@ -173,6 +175,15 @@ struct Worker::Self {
             sequence.ids = std::move(*ids);
             pending.sequences.push_back(std::move(sequence));
         }
+        // The system turn, instruction and query are the same in every pair:
+        // run them once and every document from their KV cache.
+        if (engine.prefix_cache()) {
+            if (auto split = engine::split_prefix(pending.sequences, query_image ? 1 : 0, engine.image_token())) {
+                pending.tokens += split->prefix.ids.size() * pending.sequences.size();
+                pending.prefix = std::move(split->prefix);
+                pending.sequences = std::move(split->rest);
+            }
+        }
         return std::nullopt;
     }
 
@@ -262,7 +273,7 @@ struct Worker::Self {
             std::vector<engine::Sequence> sequences;
             for (auto index : batch.indices) sequences.push_back(std::move(pending.sequences[index]));
             const auto started = std::chrono::steady_clock::now();
-            auto hidden = engine.last_hidden(sequences);
+            auto hidden = pending.prefix ? engine.last_hidden_after(*pending.prefix, sequences) : engine.last_hidden(sequences);
             const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
             usize tokens = 0;
             for (usize k = 0; k < sequences.size(); ++k) {

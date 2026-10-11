@@ -83,7 +83,8 @@ std::unique_ptr<service::Worker> start(engine::Kind kind, const service::Config 
                   .batch_buckets = config.batch_buckets,
                   .max_batch_tokens = config.max_batch_tokens,
                   .image_size = config.image_size,
-                  .dynamic_quantization = config.dynamic_quantization,
+                  .dynamic_quantization_group = config.dynamic_quantization_group,
+                  .prefix_cache = kind == engine::Kind::RERANKER && config.rerank_prefix_cache,
               });
     if (!loaded) {
         std::fprintf(stderr, "qvl-server: cannot load %s: %s\n", model->name.c_str(), loaded.error().c_str());

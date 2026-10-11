@@ -3,6 +3,7 @@
 #include <expected>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -35,11 +36,15 @@ struct Options {
     u32 max_batch_tokens = 8192;
     /// Side of the square every image is letterboxed to (multiple of 32).
     u32 image_size = 256;
-    /// OpenVINO's activation quantization for int8 weights. Off by default: the
-    /// int8 vision merger is numerically unstable with it.
-    bool dynamic_quantization = false;
+    /// OpenVINO's dynamic quantization of activations in the language model (a
+    /// group size; 0: off; UINT64_MAX: per token). The vision encoder never uses
+    /// it: its int8 merger is numerically unstable with it.
+    u64 dynamic_quantization_group = 0;
     /// Run one text and one image at load time, so the first requests are fast.
     bool warm_up = true;
+    /// Keep the language model's KV cache so last_hidden_after() can run a
+    /// shared prefix once (the reranker: system, instruction and query).
+    bool prefix_cache = false;
     /// Vision-encoder outputs kept by image key (about 2 MiB per 256x256 image);
     /// a picture seen again skips the encoder. 0 disables the cache.
     usize image_cache_bytes = usize{512} << 20;
@@ -63,6 +68,17 @@ struct Sequence {
     std::vector<i32> ids;
     std::vector<Image> images;
 };
+
+/// The longest token prefix all `sequences` share, for Engine::last_hidden_after():
+/// the prefix (with the first `shared_images` pictures, which must lie in it)
+/// and each sequence's remainder. It never reaches into a further picture and
+/// leaves every remainder at least one token. Null when the prefix would be
+/// shorter than `min_prefix` tokens.
+struct Split {
+    Sequence prefix;
+    std::vector<Sequence> rest;
+};
+std::optional<Split> split_prefix(std::span<const Sequence> sequences, usize shared_images, i32 image_token, usize min_prefix = 16);
 
 /// Cumulative time per stage, for /metrics.
 struct Timings {
@@ -110,6 +126,13 @@ struct Engine {
     /// [batch.size(), hidden()] row-major: each sequence's hidden state at its
     /// last token. All sequences must fit max_length(), and the batch max_batch().
     std::expected<std::vector<float>, std::string> last_hidden(std::span<const Sequence> batch);
+
+    /// As last_hidden() for prefix + each continuation, running `prefix` once
+    /// and every continuation from its KV cache. Needs Options::prefix_cache;
+    /// the prefix's images must lie wholly in it.
+    std::expected<std::vector<float>, std::string> last_hidden_after(const Sequence &prefix, std::span<const Sequence> continuations);
+
+    bool prefix_cache() const noexcept { return options().prefix_cache; }
 
     struct Self;
 

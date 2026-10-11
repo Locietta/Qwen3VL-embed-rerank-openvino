@@ -135,7 +135,8 @@ int main() {
         service::Config config;
         config.image_roots = {fixture_dir().string()};
         auto load = [&](qvl::engine::Kind kind, std::string_view name) {
-            auto engine = qvl::engine::Engine::load(kind, {.dir = *model_dir(name), .warm_up = false});
+            auto engine = qvl::engine::Engine::load(
+                kind, {.dir = *model_dir(name), .warm_up = false, .prefix_cache = kind == qvl::engine::Kind::RERANKER});
             require(engine.has_value(), engine ? "" : engine.error());
             return std::make_unique<service::Worker>(std::move(*engine));
         };
