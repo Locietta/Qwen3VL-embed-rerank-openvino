@@ -65,6 +65,7 @@ struct WorkerStats {
     u64 tokens = 0;
     double busy_seconds = 0;
     usize queued = 0;
+    engine::Timings engine;
 };
 
 /// Owns an Engine and runs it on its own thread. Jobs are submitted from the

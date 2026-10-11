@@ -5,6 +5,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include <lighter/types.hpp>
@@ -39,13 +40,40 @@ struct Options {
     bool dynamic_quantization = false;
     /// Run one text and one image at load time, so the first requests are fast.
     bool warm_up = true;
+    /// Vision-encoder outputs kept by image key (about 2 MiB per 256x256 image);
+    /// a picture seen again skips the encoder. 0 disables the cache.
+    usize image_cache_bytes = usize{512} << 20;
+};
+
+/// One picture of a prompt.
+struct Image {
+    /// Identifies the picture for the encoder cache (e.g. a hash of its file);
+    /// empty: never cached.
+    std::string key;
+    /// Its patches; may be null when `encoded` is set.
+    std::shared_ptr<const image::Patches> patches;
+    /// The cached encoder output from Engine::lookup(key), held so eviction
+    /// cannot take it away before the sequence runs.
+    std::shared_ptr<const void> encoded;
 };
 
 /// One prompt ready for the model: its token ids and, for every run of
-/// <|image_pad|> in order, the image's patches.
+/// <|image_pad|> in order, the picture.
 struct Sequence {
     std::vector<i32> ids;
-    std::vector<image::Patches> images;
+    std::vector<Image> images;
+};
+
+/// Cumulative time per stage, for /metrics.
+struct Timings {
+    double vision_seconds = 0;
+    double token_embedding_seconds = 0;
+    double language_seconds = 0;
+    /// Building inputs and copying tensors on the host.
+    double host_seconds = 0;
+    u64 images_encoded = 0;
+    u64 images_cached = 0;
+    u64 runs = 0;
 };
 
 /// A Qwen3-VL backbone on OpenVINO, up to the last hidden state of each
@@ -73,6 +101,11 @@ struct Engine {
     u32 max_batch(u32 length) const noexcept;
     /// lm_head["yes"] - lm_head["no"] for the reranker; empty for the embedder.
     std::span<const float> rerank_head() const noexcept;
+
+    /// The cached encoder output of the picture with this key, or null; for Image::encoded.
+    std::shared_ptr<const void> lookup(std::string_view key);
+
+    Timings timings() const noexcept;
 
     /// [batch.size(), hidden()] row-major: each sequence's hidden state at its
     /// last token. All sequences must fit max_length(), and the batch max_batch().

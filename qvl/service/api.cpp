@@ -104,6 +104,7 @@ struct WorkerMetrics {
     u64 tokens = 0;
     double busy_seconds = 0;
     usize queued = 0;
+    qvl::engine::Timings stages;
 };
 
 struct Metrics {
@@ -264,7 +265,8 @@ lighter::Task<http::ServerResponse> Api::handle(http::ServerRequest request) {
                                        .batches = stats.batches,
                                        .tokens = stats.tokens,
                                        .busy_seconds = stats.busy_seconds,
-                                       .queued = stats.queued});
+                                       .queued = stats.queued,
+                                       .stages = stats.engine});
         }
         co_return json(200, metrics);
     }

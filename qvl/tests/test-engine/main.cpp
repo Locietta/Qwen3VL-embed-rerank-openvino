@@ -42,7 +42,9 @@ engine::Sequence embedding_sequence(engine::Engine &model, const glz::generic &l
     auto image = fixture_image(line, model.options().image_size);
     const qvl::prompt::Content content{.text = optional_text(line, "text"), .image_tokens = image ? 256u * 256 / 32 / 32 : 0u};
     out.ids = model.tokenizer().encode(qvl::prompt::embedding(optional_text(line, "instruction").value_or(""), content));
-    if (image) out.images.push_back(std::move(*image));
+    if (image)
+        out.images.push_back(
+            {.key = optional_text(line, "image").value_or(""), .patches = std::make_shared<const qvl::image::Patches>(std::move(*image))});
     return out;
 }
 
@@ -120,6 +122,30 @@ void test_embeddings(const Fixtures &fixtures, const std::string &device, double
         require(same >= text_floor, std::format("{}: batched vs single cosine {}", device, same));
     }
     std::printf("  %s: a batch of %zu matches the single runs\n", device.c_str(), texts.size());
+
+    // Texts and pictures in one batch; then a picture from the encoder cache, without patches.
+    auto mixed = model.last_hidden(sequences);
+    require(mixed.has_value(), mixed ? "" : mixed.error());
+    for (usize k = 0; k < sequences.size(); ++k) {
+        const double same = dot(normalized(std::span(*mixed).subspan(k * hidden, hidden)), singles[k]);
+        require(same >= image_floor, std::format("{}: mixed batch vs single cosine {} for case {}", device, same, cases[k]));
+    }
+    for (usize k = 0; k < sequences.size(); ++k) {
+        if (sequences[k].images.empty()) continue;
+        const auto before = model.timings();
+        auto again = sequences[k];
+        again.images[0].encoded = model.lookup(again.images[0].key);
+        require(again.images[0].encoded != nullptr, "the picture was cached by key");
+        again.images[0].patches = nullptr;
+        auto cached = model.last_hidden(std::span(&again, 1));
+        require(cached.has_value(), cached ? "" : cached.error());
+        require(dot(normalized(*cached), singles[k]) > 0.99999, "a cached picture embeds the same");
+        require(model.timings().images_encoded == before.images_encoded, "without running the encoder");
+    }
+    const auto timings = model.timings();
+    std::printf("  %s: mixed batch matches; cache works; vision %.2fs, tokens %.2fs, language %.2fs, host %.2fs over %llu runs\n",
+                device.c_str(), timings.vision_seconds, timings.token_embedding_seconds, timings.language_seconds, timings.host_seconds,
+                static_cast<unsigned long long>(timings.runs));
 }
 
 /// Rerank scores match the OpenVINO reference.
@@ -135,7 +161,7 @@ void test_rerank(const Fixtures &fixtures, const std::string &device, double tol
         auto image = fixture_image(documents[i], model.options().image_size);
         const qvl::prompt::Content document{.text = optional_text(documents[i], "text"), .image_tokens = image ? 64u : 0u};
         sequence.ids = model.tokenizer().encode(qvl::prompt::rerank("", {.text = optional_text(query, "text")}, document));
-        if (image) sequence.images.push_back(std::move(*image));
+        if (image) sequence.images.push_back({.patches = std::make_shared<const qvl::image::Patches>(std::move(*image))});
         auto hidden_state = model.last_hidden(std::span(&sequence, 1));
         require(hidden_state.has_value(), hidden_state ? "" : hidden_state.error());
         const double score = 1 / (1 + std::exp(-dot(*hidden_state, model.rerank_head())));

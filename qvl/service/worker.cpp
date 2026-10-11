@@ -59,6 +59,13 @@ struct Batch {
     std::vector<usize> indices;
 };
 
+/// A picture's cache key: two independent 64-bit hashes of its bytes and its size.
+std::string image_key(std::string_view bytes) {
+    u64 fnv = 14695981039346656037ull;
+    for (unsigned char c : bytes) fnv = (fnv ^ c) * 1099511628211ull;
+    return std::format("{:016x}{:016x}-{}", fnv, std::hash<std::string_view>{}(bytes), bytes.size());
+}
+
 /// Cuts `text` back until render(text) tokenizes within `limit`.
 std::expected<std::vector<i32>, std::string>
 fit(const tokenizer::Tokenizer &tokenizer, const std::function<std::string(std::string_view)> &render, std::string_view text, u32 limit) {
@@ -96,10 +103,16 @@ struct Worker::Self {
         wake.notify_one();
     }
 
-    Result<image::Patches> load_image(const std::string &bytes) const {
+    /// A picture for the engine: its cached encoder output when the same bytes
+    /// were seen before, otherwise its decoded patches.
+    Result<engine::Image> picture(const std::string &bytes) {
+        engine::Image out{.key = image_key(bytes)};
+        out.encoded = engine.lookup(out.key);
+        if (out.encoded) return out;
         auto decoded = image::decode(std::as_bytes(std::span(bytes)));
         if (!decoded) return std::unexpected(Failure{400, decoded.error()});
-        return image::patchify(image::letterbox(*decoded, engine.options().image_size));
+        out.patches = std::make_shared<const image::Patches>(image::patchify(image::letterbox(*decoded, engine.options().image_size)));
+        return out;
     }
 
     u32 image_tokens() const {
@@ -116,9 +129,9 @@ struct Worker::Self {
                 const auto &input = job->inputs[i];
                 engine::Sequence sequence;
                 if (input.image) {
-                    auto patches = load_image(*input.image);
-                    if (!patches) return Failure{400, std::format("input {}: {}", i, patches.error().message)};
-                    sequence.images.push_back(std::move(*patches));
+                    auto image = picture(*input.image);
+                    if (!image) return Failure{400, std::format("input {}: {}", i, image.error().message)};
+                    sequence.images.push_back(std::move(*image));
                 }
                 const u32 tokens = input.image ? image_tokens() : 0;
                 auto render = [&](std::string_view text) {
@@ -134,11 +147,11 @@ struct Worker::Self {
         }
 
         auto &job = std::get<RerankJob>(pending.job);
-        std::optional<image::Patches> query_image;
+        std::optional<engine::Image> query_image;
         if (job.query.image) {
-            auto patches = load_image(*job.query.image);
-            if (!patches) return Failure{400, "query: " + patches.error().message};
-            query_image = std::move(*patches);
+            auto image = picture(*job.query.image);
+            if (!image) return Failure{400, "query: " + image.error().message};
+            query_image = std::move(*image);
         }
         const prompt::Content query{.text = job.query.text, .image_tokens = query_image ? image_tokens() : 0};
         for (usize i = 0; i < job.documents.size(); ++i) {
@@ -146,9 +159,9 @@ struct Worker::Self {
             engine::Sequence sequence;
             if (query_image) sequence.images.push_back(*query_image);
             if (document.image) {
-                auto patches = load_image(*document.image);
-                if (!patches) return Failure{400, std::format("document {}: {}", i, patches.error().message)};
-                sequence.images.push_back(std::move(*patches));
+                auto image = picture(*document.image);
+                if (!image) return Failure{400, std::format("document {}: {}", i, image.error().message)};
+                sequence.images.push_back(std::move(*image));
             }
             const u32 tokens = document.image ? image_tokens() : 0;
             auto render = [&](std::string_view text) {
@@ -163,8 +176,7 @@ struct Worker::Self {
         return std::nullopt;
     }
 
-    /// Longest first; text sequences share a batch up to the bucket's limit,
-    /// image sequences run alone.
+    /// Longest first; sequences share a batch up to the bucket's limit.
     std::vector<Batch> batches(const std::shared_ptr<Pending> &pending) const {
         std::vector<usize> order(pending->sequences.size());
         std::iota(order.begin(), order.end(), 0);
@@ -174,12 +186,8 @@ struct Worker::Self {
         for (usize at = 0; at < order.size();) {
             const auto &first = pending->sequences[order[at]];
             Batch batch{.job = pending, .indices = {order[at++]}};
-            if (first.images.empty()) {
-                const u32 capacity = engine.max_batch(static_cast<u32>(first.ids.size()));
-                while (at < order.size() && batch.indices.size() < capacity && pending->sequences[order[at]].images.empty()) {
-                    batch.indices.push_back(order[at++]);
-                }
-            }
+            const u32 capacity = engine.max_batch(static_cast<u32>(first.ids.size()));
+            while (at < order.size() && batch.indices.size() < capacity) batch.indices.push_back(order[at++]);
             out.push_back(std::move(batch));
         }
         return out;
@@ -267,6 +275,7 @@ struct Worker::Self {
                 stats.sequences += batch.indices.size();
                 stats.tokens += tokens;
                 stats.busy_seconds += seconds;
+                stats.engine = engine.timings();
             }
             if (!hidden) {
                 pending.fail({500, hidden.error()});

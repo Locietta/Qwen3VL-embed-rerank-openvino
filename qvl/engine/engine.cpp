@@ -1,7 +1,10 @@
 #include "engine.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cstring>
+#include <list>
+#include <unordered_map>
 #include <exception>
 #include <format>
 #include <fstream>
@@ -99,6 +102,20 @@ struct Engine::Self {
     std::vector<float> rotary;
     std::vector<float> attention_mask;
 
+    /// One picture through the vision encoder: its language-model rows
+    /// [tokens, hidden] and its deepstack rows [3, tokens, hidden].
+    struct Encoded {
+        std::vector<float> rows;
+        std::vector<float> deep;
+        usize bytes() const { return (rows.size() + deep.size()) * sizeof(float); }
+    };
+    /// Most recently used first.
+    std::list<std::pair<std::string, std::shared_ptr<const Encoded>>> lru;
+    std::unordered_map<std::string, decltype(lru)::iterator> cache;
+    usize cache_bytes = 0;
+
+    Timings timings;
+
     u32 bucket_length(usize length) const {
         for (auto bucket : options.length_buckets) {
             if (length <= bucket) return bucket;
@@ -122,9 +139,7 @@ struct Engine::Self {
         return out;
     }
 
-    /// One image through the vision encoder: its language-model rows
-    /// [tokens, hidden] and its deepstack rows [3, tokens, hidden].
-    std::pair<std::vector<float>, std::vector<float>> encode_image(const image::Patches &patches) {
+    std::shared_ptr<const Encoded> encode_image(const image::Patches &patches) {
         const usize n = grid.patches();
         auto &values = const_cast<std::vector<float> &>(patches.values);
         patch.set_input_tensor(view(ov::element::f32, {n, image::k_patch_values}, values));
@@ -140,11 +155,50 @@ struct Engine::Self {
         merger.infer();
         const auto rows = merger.get_output_tensor(0);
         const auto deep = merger.get_output_tensor(1);
-        return {std::vector<float>(rows.data<float>(), rows.data<float>() + rows.get_size()),
-                std::vector<float>(deep.data<float>(), deep.data<float>() + deep.get_size())};
+        return std::make_shared<const Encoded>(Encoded{
+            .rows = std::vector<float>(rows.data<float>(), rows.data<float>() + rows.get_size()),
+            .deep = std::vector<float>(deep.data<float>(), deep.data<float>() + deep.get_size()),
+        });
+    }
+
+    /// The encoder output of `image`, from the cache when its key is known.
+    std::shared_ptr<const Encoded> encoded(const Image &image) {
+        if (image.encoded) return std::static_pointer_cast<const Encoded>(image.encoded);
+        if (!image.key.empty()) {
+            if (const auto found = cache.find(image.key); found != cache.end()) {
+                lru.splice(lru.begin(), lru, found->second);
+                ++timings.images_cached;
+                return found->second->second;
+            }
+        }
+        if (!image.patches) throw std::runtime_error("an uncached image without patches");
+        const vision::Grid seen{.h = image.patches->grid_h, .w = image.patches->grid_w};
+        if (seen != grid) {
+            throw std::runtime_error(std::format("an image of {}x{} patches; the encoder takes {}x{}", seen.h, seen.w, grid.h, grid.w));
+        }
+        const auto started = std::chrono::steady_clock::now();
+        auto out = encode_image(*image.patches);
+        timings.vision_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        ++timings.images_encoded;
+        if (!image.key.empty() && out->bytes() <= options.image_cache_bytes) {
+            lru.emplace_front(image.key, out);
+            cache.emplace(image.key, lru.begin());
+            cache_bytes += out->bytes();
+            while (cache_bytes > options.image_cache_bytes) {
+                cache_bytes -= lru.back().second->bytes();
+                cache.erase(lru.back().first);
+                lru.pop_back();
+            }
+        }
+        return out;
     }
 
     std::vector<float> run(std::span<const Sequence> batch) {
+        using clock = std::chrono::steady_clock;
+        const auto seconds = [](clock::time_point since) { return std::chrono::duration<double>(clock::now() - since).count(); };
+        const auto started = clock::now();
+        double device = 0; // vision, token embeddings and language model, excluded from host time
+        ++timings.runs;
         usize longest = 0;
         for (const auto &sequence : batch) longest = std::max(longest, sequence.ids.size());
         const usize length = bucket_length(longest);
@@ -164,8 +218,7 @@ struct Engine::Self {
 
         // Image rows in batch order: row-major over (sequence, position), the
         // order the graph's deepstack cumsum reads them in.
-        std::vector<std::vector<float>> image_rows;
-        std::vector<std::vector<float>> deep_rows;
+        std::vector<std::shared_ptr<const Encoded>> pictures;
         for (usize b = 0; b < rows; ++b) {
             if (b >= batch.size()) {
                 // Padding rows hold one token, so their attention is never empty.
@@ -174,14 +227,7 @@ struct Engine::Self {
                 continue;
             }
             const auto &sequence = batch[b];
-            std::vector<vision::Grid> grids;
-            for (const auto &image : sequence.images) {
-                const vision::Grid seen{.h = image.grid_h, .w = image.grid_w};
-                if (seen != grid)
-                    throw std::runtime_error(
-                        std::format("an image of {}x{} patches; the encoder takes {}x{}", seen.h, seen.w, grid.h, grid.w));
-                grids.push_back(seen);
-            }
+            const std::vector<vision::Grid> grids(sequence.images.size(), grid);
             auto placed = prompt::position_ids(sequence.ids, image_token, grids);
             if (!placed) throw std::runtime_error(placed.error());
             const usize n = sequence.ids.size();
@@ -193,28 +239,32 @@ struct Engine::Self {
             }
             last[b] = static_cast<i64>(n - 1);
             for (const auto &image : sequence.images) {
-                auto [lm, deep] = encode_image(image);
-                image_rows.push_back(std::move(lm));
-                deep_rows.push_back(std::move(deep));
+                const auto vision_started = clock::now();
+                pictures.push_back(encoded(image));
+                device += seconds(vision_started);
             }
         }
 
+        const auto text_started = clock::now();
         text.set_input_tensor(view(ov::element::i64, {rows, length}, ids));
         text.infer();
         const auto token_embeds = text.get_output_tensor(0);
+        const double text_seconds = seconds(text_started);
+        timings.token_embedding_seconds += text_seconds;
+        device += text_seconds;
         std::vector<float> embeds(token_embeds.data<float>(), token_embeds.data<float>() + token_embeds.get_size());
 
         // Image rows replace their placeholders' token embeddings.
         usize image_tokens = 0;
-        for (const auto &rows_of_image : image_rows) image_tokens += rows_of_image.size() / hidden;
+        for (const auto &picture : pictures) image_tokens += picture->rows.size() / hidden;
         std::vector<float> deepstack;
         if (image_tokens > 0) {
             usize image = 0;
             usize within = 0;
             for (usize i = 0; i < rows * length; ++i) {
                 if (!visual[i]) continue;
-                std::memcpy(&embeds[i * hidden], &image_rows[image][within * hidden], hidden * sizeof(float));
-                if (++within * hidden == image_rows[image].size()) {
+                std::memcpy(&embeds[i * hidden], &pictures[image]->rows[within * hidden], hidden * sizeof(float));
+                if (++within * hidden == pictures[image]->rows.size()) {
                     ++image;
                     within = 0;
                 }
@@ -222,9 +272,9 @@ struct Engine::Self {
             deepstack.resize(3 * image_tokens * hidden);
             for (usize layer = 0; layer < 3; ++layer) {
                 usize at = layer * image_tokens * hidden;
-                for (const auto &deep : deep_rows) {
-                    const usize count = deep.size() / 3;
-                    std::memcpy(&deepstack[at], &deep[layer * count], count * sizeof(float));
+                for (const auto &picture : pictures) {
+                    const usize count = picture->deep.size() / 3;
+                    std::memcpy(&deepstack[at], &picture->deep[layer * count], count * sizeof(float));
                     at += count;
                 }
             }
@@ -240,10 +290,16 @@ struct Engine::Self {
         language.set_tensor("deepstack_visual_embeds", view(ov::element::f32, {3, std::max<usize>(image_tokens, 1), hidden}, deepstack));
         language.set_tensor("beam_idx", view(ov::element::i32, {rows}, beams));
         language.set_tensor("last_index", view(ov::element::i64, {rows, 1}, last));
+        const auto language_started = clock::now();
         language.infer();
         const auto out = language.get_output_tensor(0);
+        const double language_seconds = seconds(language_started);
+        timings.language_seconds += language_seconds;
+        device += language_seconds;
         const auto *data = out.data<float>();
-        return std::vector<float>(data, data + batch.size() * hidden);
+        std::vector<float> result(data, data + batch.size() * hidden);
+        timings.host_seconds += seconds(started) - device;
+        return result;
     }
 
     /// Runs one short text and one image, so the first requests do not pay for
@@ -255,7 +311,8 @@ struct Engine::Self {
         auto text = tokenizer.encode(prompt::embedding("", {.image_tokens = grid.tokens()}));
         image::Rgb blank{.width = options.image_size, .height = options.image_size};
         blank.pixels.assign(static_cast<usize>(blank.width) * blank.height * 3, 255);
-        std::vector<Sequence> batch{Sequence{.ids = std::move(text), .images = {image::patchify(blank)}}};
+        std::vector<Sequence> batch{
+            Sequence{.ids = std::move(text), .images = {Image{.patches = std::make_shared<const image::Patches>(image::patchify(blank))}}}};
         run(batch);
     }
 };
@@ -351,6 +408,15 @@ usize Engine::hidden() const noexcept { return self->hidden; }
 u32 Engine::max_length() const noexcept { return self->options.length_buckets.back(); }
 u32 Engine::max_batch(u32 length) const noexcept { return self->max_batch(length); }
 std::span<const float> Engine::rerank_head() const noexcept { return self->head; }
+std::shared_ptr<const void> Engine::lookup(std::string_view key) {
+    if (key.empty()) return nullptr;
+    const auto found = self->cache.find(std::string(key));
+    if (found == self->cache.end()) return nullptr;
+    self->lru.splice(self->lru.begin(), self->lru, found->second);
+    ++self->timings.images_cached;
+    return found->second->second;
+}
+Timings Engine::timings() const noexcept { return self->timings; }
 
 std::expected<std::vector<float>, std::string> Engine::last_hidden(std::span<const Sequence> batch) {
     if (batch.empty()) return std::vector<float>();
