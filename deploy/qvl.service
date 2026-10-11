@@ -15,8 +15,10 @@ RestartSec=10s
 TimeoutStopSec=30s
 NoNewPrivileges=true
 UMask=0077
-# Both 2B models with every bucket compiled, plus headroom.
-MemoryMax=10G
+# GPU buffers count as shmem. Both 2B models: ~6.5 GiB stateless; the
+# reranker's KV cache (prefix reuse) adds ~2.6 GiB under varied load (soak
+# peak 10.5 GiB, 2026-10-12). Headroom on top.
+MemoryMax=14G
 
 [Install]
 WantedBy=default.target
