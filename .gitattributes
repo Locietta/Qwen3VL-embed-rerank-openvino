@@ -1,0 +1,5 @@
+# SCM syntax highlighting & preventing 3-way merges
+pixi.lock merge=binary linguist-language=YAML linguist-generated=true -diff
+
+# Golden test vectors written by tools/make_fixtures.py
+qvl/tests/fixtures/*.bin -text -diff

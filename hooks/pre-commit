@@ -1,0 +1,84 @@
+#!/usr/bin/env python3
+"""Git pre-commit hook: format staged files.
+
+If formatting changes a staged file in the working tree, the commit is rejected
+and the formatted version is left on disk so the user can review and stage it.
+"""
+
+import os
+import shutil
+import subprocess
+import sys
+
+REPO_ROOT = subprocess.check_output(
+    ["git", "rev-parse", "--show-toplevel"], text=True
+).strip()
+
+
+def get_staged_files():
+    """Return list of staged file paths (relative to repo root)."""
+    out = subprocess.check_output(
+        ["git", "diff", "--cached", "--name-only", "--diff-filter=ACM"], text=True
+    )
+    return [f.strip() for f in out.splitlines() if f.strip()]
+
+
+def main():
+    staged = get_staged_files()
+    if not staged:
+        return 0
+
+    before = {}
+    for relpath in staged:
+        abspath = os.path.join(REPO_ROOT, relpath)
+        if os.path.isfile(abspath):
+            with open(abspath, "rb") as file:
+                before[relpath] = file.read()
+
+    if not before:
+        return 0
+
+    pixi = shutil.which("pixi")
+    if pixi is None:
+        print(
+            "pre-commit: pixi was not found; ensure it is on PATH and restart your editor.",
+            file=sys.stderr,
+        )
+        return 1
+
+    result = subprocess.run(
+        [pixi, "run", "--locked", "format", "--", *before],
+        cwd=REPO_ROOT,
+        check=False,
+    )
+    if result.returncode != 0:
+        print("pre-commit: formatter failed — commit aborted.", file=sys.stderr)
+        return result.returncode
+
+    failed = []
+    for relpath, original in before.items():
+        with open(os.path.join(REPO_ROOT, relpath), "rb") as file:
+            if file.read() != original:
+                failed.append(relpath)
+
+    if failed:
+        print(
+            "pre-commit: formatting changes required — commit aborted.", file=sys.stderr
+        )
+        print(file=sys.stderr)
+        print("The following files were reformatted on disk:", file=sys.stderr)
+        for f in failed:
+            print(f"  {f}", file=sys.stderr)
+        print(file=sys.stderr)
+        print("Review and stage the changes, then commit again:", file=sys.stderr)
+        print(
+            "  git add <files> && git commit",
+            file=sys.stderr,
+        )
+        return 1
+
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

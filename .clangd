@@ -1,0 +1,6 @@
+Diagnostics:
+  Suppress:
+    - "unused-includes"
+
+CompileFlags:
+  Add: ["/clang:-std=c++26"]

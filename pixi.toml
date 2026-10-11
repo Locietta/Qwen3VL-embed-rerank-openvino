@@ -1,0 +1,79 @@
+[workspace]
+authors = ["Locietta <locietta@gmail.com>"]
+channels = ["conda-forge"]
+name = "qvl"
+# Builds and runs on Linux only; win-64 is here for the editing tools
+# (formatters, remote test and deploy scripts).
+platforms = ["win-64", "linux-64"]
+version = "0.1.0"
+
+[tasks]
+setup-hooks = "python scripts/setup_hooks.py"
+format = "python scripts/format.py"
+format-check = "python scripts/format.py --check ."
+deploy-cachy = "python scripts/deploy_cachy.py"
+test-remote-linux = "python scripts/test_remote_linux.py"
+test-remote-linux-release = "python scripts/test_remote_linux.py --mode release"
+test-remote-linux-sanitize = "python scripts/test_remote_linux.py --mode sanitize"
+
+[target.linux-64.tasks]
+configure = "xmake f -m releasedbg --sanitizers=n -y"          # we use releasedbg for development and testing
+configure-release = "xmake f -m release --sanitizers=n -y"
+configure-sanitize = "xmake f -m releasedbg --sanitizers=y -y"
+build = "xmake build -y"
+test-all = { cmd = "xmake test", depends-on = ["build"] }
+
+[dependencies]
+python = ">=3.14"
+clang-format = "==22.1.8"
+ruff = "==0.16.1"
+prettier = "==3.9.3"
+taplo = "==0.10.0"
+
+[target.linux-64.dependencies]
+ninja = "*"
+cmake = ">=4.4.0"
+# GCC 16 is the only toolchain currently shipping P2996 static reflection
+# (-freflection) and P2900 contracts, which lighter and this project use.
+gcc = "16.2.*"
+gxx = "16.2.*"
+# lighter's C dependencies
+libuv = ">=1.52.1,<2"
+libcurl = ">=8.21.0,<9"
+libiconv = ">=1.18,<2"
+# OpenVINO runtime and its devices. The GPU plugin talks to the iGPU through
+# conda-forge's Intel compute runtime (OpenCL ICD), so the host needs no
+# driver packages beyond the kernel's.
+libopenvino = "2026.4.*"
+libopenvino-dev = "2026.4.*"
+libopenvino-ir-frontend = "2026.4.*"
+libopenvino-intel-cpu-plugin = "2026.4.*"
+libopenvino-intel-gpu-plugin = "2026.4.*"
+libopenvino-intel-npu-plugin = "2026.4.*"
+intel-compute-runtime = ">=24.52,<25"
+level-zero = ">=1.33,<2"
+ocl-icd = ">=2.3,<3"
+
+# Model export and reference implementations (tools/), on CPU PyTorch.
+# optimum-intel 2.2.0 contains the commit OpenVINO GenAI 2026.4 tests its
+# Qwen3-VL exports with (4f1a926); transformers is capped below 5.1 by it.
+[feature.tools]
+platforms = ["linux-64"]
+
+[feature.tools.dependencies]
+python = "3.12.*"
+
+[feature.tools.pypi-dependencies]
+torch = { version = "==2.11.*", index = "https://download.pytorch.org/whl/cpu" }
+torchvision = { version = "==0.26.*", index = "https://download.pytorch.org/whl/cpu" }
+transformers = "==5.0.0"
+optimum-intel = "==2.2.0"
+openvino = "==2026.4.*"
+nncf = ">=3.4"
+qwen-vl-utils = ">=0.0.14"
+pillow = ">=12"
+numpy = ">=2"
+huggingface-hub = "*"
+
+[environments]
+tools = { features = ["tools"], no-default-feature = true }
