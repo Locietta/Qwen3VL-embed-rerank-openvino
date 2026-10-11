@@ -4,6 +4,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <limits>
+#include <queue>
 #include <sstream>
 #include <unordered_map>
 #include <utility>
@@ -118,30 +119,60 @@ struct Tokenizer::Self {
             }
         }
 
-        // Each byte symbol is a one-character UTF-8 string.
-        std::vector<std::string> symbols;
+        // Each byte symbol is a one-character UTF-8 string, linked to its
+        // neighbours; merging keeps the left symbol, so symbol 0 stays first.
+        struct Symbol {
+            std::string text;
+            i32 prev = -1;
+            i32 next = -1;
+            bool alive = true;
+        };
+        std::vector<Symbol> symbols;
         for (usize i = 0; i < mapped.size();) {
             const auto length = sequence_length(static_cast<unsigned char>(mapped[i]));
-            symbols.emplace_back(mapped.substr(i, length));
+            const auto index = static_cast<i32>(symbols.size());
+            symbols.push_back({.text = mapped.substr(i, length), .prev = index - 1, .next = -1});
+            if (index > 0) symbols[index - 1].next = index;
             i += length;
         }
+
+        // The lowest-ranked pair merges first, the leftmost on ties, as in
+        // `tokenizers`' BPE; a heap keeps this O(n log n) for long words.
+        struct Candidate {
+            i32 rank;
+            i32 position;
+            bool operator>(const Candidate &other) const { return rank != other.rank ? rank > other.rank : position > other.position; }
+        };
         std::string key;
-        while (symbols.size() > 1) {
-            i32 best = std::numeric_limits<i32>::max();
-            usize at = 0;
-            for (usize i = 0; i + 1 < symbols.size(); ++i) {
-                key.assign(symbols[i]).append(" ").append(symbols[i + 1]);
-                if (const auto it = ranks.find(key); it != ranks.end() && it->second < best) {
-                    best = it->second;
-                    at = i;
-                }
-            }
-            if (best == std::numeric_limits<i32>::max()) break;
-            symbols[at] += symbols[at + 1];
-            symbols.erase(symbols.begin() + static_cast<std::ptrdiff_t>(at) + 1);
+        auto rank_of = [&](i32 left) -> i32 {
+            const auto right = symbols[left].next;
+            if (right < 0) return -1;
+            key.assign(symbols[left].text).append(" ").append(symbols[right].text);
+            const auto it = ranks.find(key);
+            return it == ranks.end() ? -1 : it->second;
+        };
+        std::priority_queue<Candidate, std::vector<Candidate>, std::greater<>> queue;
+        auto offer = [&](i32 left) {
+            if (left < 0) return;
+            if (const auto rank = rank_of(left); rank >= 0) queue.push({rank, left});
+        };
+        for (i32 i = 0; i + 1 < static_cast<i32>(symbols.size()); ++i) offer(i);
+        while (!queue.empty()) {
+            const auto top = queue.top();
+            queue.pop();
+            // Skip entries made stale by an earlier merge.
+            if (!symbols[top.position].alive || rank_of(top.position) != top.rank) continue;
+            auto &left = symbols[top.position];
+            auto &right = symbols[left.next];
+            left.text += right.text;
+            right.alive = false;
+            left.next = right.next;
+            if (left.next >= 0) symbols[left.next].prev = top.position;
+            offer(left.prev);
+            offer(top.position);
         }
-        for (const auto &symbol : symbols) {
-            if (const auto it = vocab.find(symbol); it != vocab.end()) out.push_back(it->second);
+        for (i32 i = symbols.empty() ? -1 : 0; i >= 0; i = symbols[i].next) {
+            if (const auto it = vocab.find(symbols[i].text); it != vocab.end()) out.push_back(it->second);
         }
     }
 

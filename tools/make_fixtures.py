@@ -55,6 +55,10 @@ CORPUS = [
     "'s 't 're 've 'm 'll 'd 'S 'LL don't I've",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "哈" * 40,
+    # Long pre-tokens: BPE must stay fast and exact on them.
+    "x" * 6000,
+    "测试" * 1500,
+    "ab" * 2000 + " " + "1" * 300,
     "———…… 【括号】《书名》「引号」 ～",
     "​ zero width  nbsp 　ideographic space",
 ]

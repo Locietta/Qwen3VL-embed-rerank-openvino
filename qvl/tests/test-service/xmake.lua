@@ -1,0 +1,6 @@
+target("test-service")
+    set_kind("binary")
+    set_group("test")
+    add_files("main.cpp")
+    add_deps("qvl-service")
+    add_tests("default")

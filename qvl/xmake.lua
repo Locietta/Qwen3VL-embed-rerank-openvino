@@ -1,6 +1,6 @@
 includes("xmake/rules/*.lua")
 
-add_requires("lighter 0.3.0")
+add_requires("lighter 0.3.1")
 -- Built by xmake rather than found on the host: a system library lives
 -- outside the Pixi sysroot the compiler searches.
 add_requires("pcre2", {system = false})
@@ -33,10 +33,16 @@ target("qvl-engine")
     add_deps("qvl-core")
     add_packages("openvino", {public = true})
 
+-- Workers, config and the HTTP API.
+target("qvl-service")
+    set_kind("static")
+    add_files("service/*.cpp")
+    add_deps("qvl-engine", {public = true})
+
 target("qvl-server")
     set_kind("binary")
     add_rules("utils.version.cpp")
     add_files("main.cpp")
-    add_deps("qvl-engine")
+    add_deps("qvl-service")
 
 includes("tests/xmake.lua")
