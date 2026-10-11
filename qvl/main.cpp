@@ -1,6 +1,7 @@
 #include <chrono>
 #include <cstdio>
 #include <exception>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -8,6 +9,7 @@
 #include <tuple>
 #include <vector>
 
+#include <glaze/json.hpp>
 #include <openvino/openvino.hpp>
 
 #include <lighter/async/io/loop.h>
@@ -19,6 +21,7 @@
 #include <qvl/service/api.h>
 #include <qvl/service/config.h>
 #include <qvl/service/worker.h>
+#include <qvl/tokenizer/tokenizer.h>
 
 #include <xmake/version/qvl.hpp>
 
@@ -41,6 +44,28 @@ int list_devices() {
     } catch (const std::exception &error) {
         std::fprintf(stderr, "qvl-server: %s\n", error.what());
         return 1;
+    }
+    return 0;
+}
+
+/// `--tokenize <tokenizer.json>`: one JSON string per stdin line in, its token
+/// ids out (space-separated), for comparing with Hugging Face tokenizers.
+int tokenize(const char *path) {
+    auto tokenizer = tokenizer::Tokenizer::load(path);
+    if (!tokenizer) {
+        std::fprintf(stderr, "qvl-server: %s\n", tokenizer.error().c_str());
+        return 1;
+    }
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        std::string text;
+        if (glz::read_json(text, line)) {
+            std::fprintf(stderr, "qvl-server: not a JSON string: %s\n", line.c_str());
+            return 1;
+        }
+        std::string out;
+        for (const auto id : tokenizer->encode(text)) out += std::to_string(id) + ' ';
+        std::puts(out.c_str());
     }
     return 0;
 }
@@ -131,12 +156,15 @@ int main(int argc, char **argv) {
             return 0;
         }
         if (argument == "--devices") return list_devices();
+        if (argument == "--tokenize" && i + 1 < argc) return tokenize(argv[i + 1]);
         if (argument == "--check-config") {
             check = true;
         } else if (argument == "--config" && i + 1 < argc) {
             config_path = argv[++i];
         } else {
-            std::fprintf(stderr, "usage: qvl-server --config <config.json> [--check-config] | --version | --devices\n");
+            std::fprintf(
+                stderr,
+                "usage: qvl-server --config <config.json> [--check-config] | --version | --devices | --tokenize <tokenizer.json>\n");
             return 2;
         }
     }
