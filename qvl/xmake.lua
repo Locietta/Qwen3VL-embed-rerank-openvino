@@ -19,8 +19,18 @@ package("openvino")
 package_end()
 add_requires("openvino")
 
+-- Everything before the model: tokenizer, images, prompts, vision tables.
+target("qvl-core")
+    set_kind("static")
+    add_files("tokenizer/*.cpp", "image/*.cpp", "prompt/*.cpp", "vision/*.cpp")
+    add_packages("lighter", {public = true})
+    add_packages("pcre2", "utf8proc", "stb")
+
 target("qvl-server")
     set_kind("binary")
     add_rules("utils.version.cpp")
     add_files("main.cpp")
-    add_packages("lighter", "openvino")
+    add_deps("qvl-core")
+    add_packages("openvino")
+
+includes("tests/xmake.lua")

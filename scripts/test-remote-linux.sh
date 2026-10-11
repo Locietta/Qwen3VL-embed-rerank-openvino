@@ -96,6 +96,10 @@ fi
 
 export QVL_SOURCE_COMMIT=$commit
 export QVL_SOURCE_DIRTY=$dirty
+# Exported models (tools/export.py) for the tests that run them.
+if [[ -d $HOME/services/qvl/models ]]; then
+    export QVL_TEST_MODELS=$HOME/services/qvl/models
+fi
 log_file="$ci_root/logs/$(date -u +%Y%m%dT%H%M%SZ)-$mode-${commit:0:12}.log"
 
 cd "$source_root"

@@ -1,0 +1,6 @@
+target("test-vision")
+    set_kind("binary")
+    set_group("test")
+    add_files("main.cpp")
+    add_deps("qvl-core")
+    add_tests("default")
