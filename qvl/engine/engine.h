@@ -48,6 +48,11 @@ struct Options {
     /// Vision-encoder outputs kept by image key (about 2 MiB per 256x256 image);
     /// a picture seen again skips the encoder. 0 disables the cache.
     usize image_cache_bytes = usize{512} << 20;
+    /// Also keep them on disk, under a directory per model, revision and image
+    /// size, so the cache survives restarts; empty disables it.
+    std::filesystem::path image_cache_dir;
+    /// The disk cache's size; the oldest files go first.
+    u64 image_cache_disk_bytes = u64{4} << 30;
 };
 
 /// One picture of a prompt.
@@ -89,6 +94,10 @@ struct Timings {
     double host_seconds = 0;
     u64 images_encoded = 0;
     u64 images_cached = 0;
+    /// Of images_cached, how many came from the disk cache.
+    u64 images_from_disk = 0;
+    /// Prefixes run for last_hidden_after().
+    u64 prefixes_run = 0;
     u64 runs = 0;
 };
 

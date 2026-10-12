@@ -43,6 +43,11 @@ struct Config {
     u64 dynamic_quantization_group = 0;
     /// Run each rerank request's shared prefix (system, instruction, query) once.
     bool rerank_prefix_cache = true;
+    /// Vision-encoder outputs in memory (~2 MiB per picture).
+    usize image_cache_bytes = usize{512} << 20;
+    /// ... and on disk, surviving restarts; empty disables the disk cache.
+    std::string image_cache_dir = "~/.cache/qvl/vision";
+    u64 image_cache_disk_bytes = u64{4} << 30;
     usize max_body_bytes = 32 * 1024 * 1024;
     usize max_inputs = 256;
     usize max_image_bytes = 16 * 1024 * 1024;

@@ -1,7 +1,9 @@
 #include "engine.h"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <list>
@@ -11,7 +13,9 @@
 #include <fstream>
 #include <map>
 #include <numeric>
+#include <sstream>
 
+#include <glaze/json.hpp>
 #include <openvino/op/constant.hpp>
 #include <openvino/op/gather.hpp>
 #include <openvino/op/parameter.hpp>
@@ -120,6 +124,10 @@ struct Engine::Self {
     std::unordered_map<std::string, decltype(lru)::iterator> cache;
     usize cache_bytes = 0;
 
+    /// The disk cache's directory (empty: none) and its running size.
+    std::filesystem::path disk;
+    u64 disk_bytes = 0;
+
     Timings timings;
     /// The language model keeps its KV cache (Options::prefix_cache).
     bool stateful = false;
@@ -169,16 +177,113 @@ struct Engine::Self {
         });
     }
 
+    /// Into the memory cache, evicting the least recently used.
+    void remember(const std::string &key, std::shared_ptr<const Encoded> encoded) {
+        if (encoded->bytes() > options.image_cache_bytes) return;
+        lru.emplace_front(key, std::move(encoded));
+        cache.emplace(key, lru.begin());
+        cache_bytes += lru.front().second->bytes();
+        while (cache_bytes > options.image_cache_bytes) {
+            cache_bytes -= lru.back().second->bytes();
+            cache.erase(lru.back().first);
+            lru.pop_back();
+        }
+    }
+
+    /// Keys become file names: only hash characters.
+    static bool safe_key(std::string_view key) {
+        return !key.empty() && key.size() <= 128 &&
+               std::ranges::all_of(key, [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '-' || c == '_'; });
+    }
+
+    struct DiskHeader {
+        char magic[8] = {'Q', 'V', 'L', 'V', 'I', 'S', '1', '\0'};
+        u64 rows = 0;
+        u64 deep = 0;
+    };
+
+    std::shared_ptr<const Encoded> load(const std::string &key) {
+        if (disk.empty() || !safe_key(key)) return nullptr;
+        const auto path = disk / (key + ".bin");
+        std::ifstream in(path, std::ios::binary);
+        if (!in) return nullptr;
+        DiskHeader header;
+        in.read(reinterpret_cast<char *>(&header), sizeof header);
+        const usize rows = static_cast<usize>(grid.tokens()) * hidden;
+        if (!in || std::memcmp(header.magic, DiskHeader{}.magic, sizeof header.magic) != 0 || header.rows != rows ||
+            header.deep != 3 * rows) {
+            return nullptr;
+        }
+        Encoded out{.rows = std::vector<float>(rows), .deep = std::vector<float>(3 * rows)};
+        in.read(reinterpret_cast<char *>(out.rows.data()), static_cast<std::streamsize>(rows * sizeof(float)));
+        in.read(reinterpret_cast<char *>(out.deep.data()), static_cast<std::streamsize>(3 * rows * sizeof(float)));
+        if (!in) return nullptr;
+        std::error_code ec;
+        std::filesystem::last_write_time(path, std::filesystem::file_time_type::clock::now(), ec); // recently used
+        return std::make_shared<const Encoded>(std::move(out));
+    }
+
+    /// Best effort: a write that fails only costs a later re-encode.
+    void store(const std::string &key, const Encoded &encoded) {
+        if (disk.empty() || !safe_key(key)) return;
+        const auto path = disk / (key + ".bin");
+        const auto partial = disk / (key + ".tmp");
+        {
+            std::ofstream out(partial, std::ios::binary | std::ios::trunc);
+            const DiskHeader header{.rows = encoded.rows.size(), .deep = encoded.deep.size()};
+            out.write(reinterpret_cast<const char *>(&header), sizeof header);
+            out.write(reinterpret_cast<const char *>(encoded.rows.data()),
+                      static_cast<std::streamsize>(encoded.rows.size() * sizeof(float)));
+            out.write(reinterpret_cast<const char *>(encoded.deep.data()),
+                      static_cast<std::streamsize>(encoded.deep.size() * sizeof(float)));
+            if (!out) return;
+        }
+        std::error_code ec;
+        std::filesystem::rename(partial, path, ec);
+        if (ec) return;
+        disk_bytes += sizeof(DiskHeader) + encoded.bytes();
+        if (disk_bytes > options.image_cache_disk_bytes) prune();
+    }
+
+    /// Drops the least recently used files until the cache is under 90% of its size.
+    void prune() {
+        std::vector<std::pair<std::filesystem::file_time_type, std::filesystem::path>> files;
+        std::error_code ec;
+        disk_bytes = 0;
+        for (const auto &entry : std::filesystem::directory_iterator(disk, ec)) {
+            if (entry.path().extension() != ".bin") continue;
+            files.emplace_back(entry.last_write_time(ec), entry.path());
+            disk_bytes += entry.file_size(ec);
+        }
+        std::ranges::sort(files);
+        for (const auto &[time, path] : files) {
+            if (disk_bytes <= options.image_cache_disk_bytes / 10 * 9) break;
+            const auto size = std::filesystem::file_size(path, ec);
+            if (std::filesystem::remove(path, ec)) disk_bytes -= size;
+        }
+    }
+
+    /// From memory, then disk.
+    std::shared_ptr<const Encoded> find(const std::string &key) {
+        if (key.empty()) return nullptr;
+        if (const auto found = cache.find(key); found != cache.end()) {
+            lru.splice(lru.begin(), lru, found->second);
+            ++timings.images_cached;
+            return found->second->second;
+        }
+        if (auto loaded = load(key)) {
+            remember(key, loaded);
+            ++timings.images_cached;
+            ++timings.images_from_disk;
+            return loaded;
+        }
+        return nullptr;
+    }
+
     /// The encoder output of `image`, from the cache when its key is known.
     std::shared_ptr<const Encoded> encoded(const Image &image) {
         if (image.encoded) return std::static_pointer_cast<const Encoded>(image.encoded);
-        if (!image.key.empty()) {
-            if (const auto found = cache.find(image.key); found != cache.end()) {
-                lru.splice(lru.begin(), lru, found->second);
-                ++timings.images_cached;
-                return found->second->second;
-            }
-        }
+        if (auto found = find(image.key)) return found;
         if (!image.patches) throw std::runtime_error("an uncached image without patches");
         const vision::Grid seen{.h = image.patches->grid_h, .w = image.patches->grid_w};
         if (seen != grid) {
@@ -188,15 +293,9 @@ struct Engine::Self {
         auto out = encode_image(*image.patches);
         timings.vision_seconds += std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
         ++timings.images_encoded;
-        if (!image.key.empty() && out->bytes() <= options.image_cache_bytes) {
-            lru.emplace_front(image.key, out);
-            cache.emplace(image.key, lru.begin());
-            cache_bytes += out->bytes();
-            while (cache_bytes > options.image_cache_bytes) {
-                cache_bytes -= lru.back().second->bytes();
-                cache.erase(lru.back().first);
-                lru.pop_back();
-            }
+        if (!image.key.empty()) {
+            remember(image.key, out);
+            store(image.key, *out);
         }
         return out;
     }
@@ -211,7 +310,7 @@ struct Engine::Self {
     };
 
     /// Runs `prefix` alone, right-padded, leaving its keys and values in the
-    /// state for run_after(). Right padding keeps every attention row non-empty.
+    /// state for the continuations. Right padding keeps every attention row non-empty.
     Past run_prefix(const Sequence &prefix) {
         const Sequence *one = &prefix;
         run(std::span<const Sequence *const>(&one, 1), nullptr);
@@ -475,6 +574,31 @@ std::expected<Engine, std::string> Engine::load(Kind kind, const Options &option
         self->rotary = vision::rotary(self->grid);
         self->attention_mask.assign(n * n, 0.0f);
 
+        // The disk cache is keyed by model, revision and image size, so a
+        // re-export or another letterbox never reads stale encoder outputs.
+        if (!options.image_cache_dir.empty()) {
+            std::string revision = "unknown";
+            if (std::ifstream manifest(options.dir / "manifest.json"); manifest) {
+                std::stringstream text;
+                text << manifest.rdbuf();
+                glz::generic parsed;
+                if (!glz::read<glz::opts{.null_terminated = false}>(parsed, text.str()) && parsed.contains("revision") &&
+                    parsed["revision"].is_string()) {
+                    revision = parsed["revision"].get_string().substr(0, 12);
+                }
+            }
+            self->disk = options.image_cache_dir / std::format("{}-{}-{}", options.dir.filename().string(), revision, options.image_size);
+            std::error_code ec;
+            std::filesystem::create_directories(self->disk, ec);
+            if (ec) return std::unexpected("cannot create " + self->disk.string() + ": " + ec.message());
+            for (const auto &entry : std::filesystem::directory_iterator(self->disk, ec)) {
+                if (entry.path().extension() == ".tmp")
+                    std::filesystem::remove(entry.path(), ec);
+                else if (entry.path().extension() == ".bin")
+                    self->disk_bytes += entry.file_size(ec);
+            }
+        }
+
         if (kind == Kind::RERANKER) {
             auto head = read_floats(options.dir / "rerank_head.f32");
             if (!head) return std::unexpected(head.error());
@@ -496,14 +620,7 @@ usize Engine::hidden() const noexcept { return self->hidden; }
 u32 Engine::max_length() const noexcept { return self->options.length_buckets.back(); }
 u32 Engine::max_batch(u32 length) const noexcept { return self->max_batch(length); }
 std::span<const float> Engine::rerank_head() const noexcept { return self->head; }
-std::shared_ptr<const void> Engine::lookup(std::string_view key) {
-    if (key.empty()) return nullptr;
-    const auto found = self->cache.find(std::string(key));
-    if (found == self->cache.end()) return nullptr;
-    self->lru.splice(self->lru.begin(), self->lru, found->second);
-    ++self->timings.images_cached;
-    return found->second->second;
-}
+std::shared_ptr<const void> Engine::lookup(std::string_view key) { return self->find(std::string(key)); }
 Timings Engine::timings() const noexcept { return self->timings; }
 
 std::expected<std::vector<float>, std::string> Engine::last_hidden_after(const Sequence &prefix, std::span<const Sequence> continuations) {
@@ -511,6 +628,7 @@ std::expected<std::vector<float>, std::string> Engine::last_hidden_after(const S
     if (continuations.empty()) return std::vector<float>();
     try {
         const auto past = self->run_prefix(prefix);
+        ++self->timings.prefixes_run;
         return self->run(continuations, &past);
     } catch (const std::exception &error) {
         return std::unexpected(error.what());

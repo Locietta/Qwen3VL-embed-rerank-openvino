@@ -2,10 +2,13 @@
 #include <cmath>
 #include <cstdio>
 #include <exception>
+#include <filesystem>
 #include <format>
 #include <optional>
 #include <span>
 #include <string>
+
+#include <unistd.h>
 
 #include <qvl/engine/engine.h>
 #include <qvl/image/image.h>
@@ -189,6 +192,43 @@ void test_rerank(const Fixtures &fixtures, const std::string &device, double tol
     std::printf("  %s: prefix reuse (%zu shared tokens) matches the full runs\n", device.c_str(), split->prefix.ids.size());
 }
 
+/// A fresh engine finds pictures an earlier one encoded in the disk cache.
+void test_disk_cache(const Fixtures &fixtures) {
+    const auto dir = std::filesystem::temp_directory_path() / std::format("qvl-test-vision-{}", ::getpid());
+    std::filesystem::remove_all(dir);
+    const auto load_cached = [&] {
+        auto model = engine::Engine::load(engine::Kind::EMBEDDING, {.dir = *model_dir(k_embedding_model),
+                                                                    .language_device = "CPU",
+                                                                    .vision_device = "CPU",
+                                                                    .warm_up = false,
+                                                                    .image_cache_dir = dir});
+        require(model.has_value(), model ? "" : model.error());
+        return std::move(*model);
+    };
+    const glz::generic *card = nullptr;
+    for (const auto &line : fixtures["embeddings"].get_array()) {
+        if (optional_text(line, "image") == "card-256" && !line.contains("text")) card = &line;
+    }
+    require(card != nullptr, "the card fixture");
+    std::vector<float> first;
+    {
+        auto model = load_cached();
+        auto sequence = embedding_sequence(model, *card);
+        auto hidden = model.last_hidden(std::span(&sequence, 1));
+        require(hidden.has_value(), hidden ? "" : hidden.error());
+        first = *hidden;
+    }
+    auto model = load_cached();
+    auto sequence = embedding_sequence(model, *card);
+    sequence.images[0].encoded = model.lookup(sequence.images[0].key);
+    require(sequence.images[0].encoded != nullptr && model.timings().images_from_disk == 1, "the picture came from disk");
+    sequence.images[0].patches = nullptr;
+    auto hidden = model.last_hidden(std::span(&sequence, 1));
+    require(hidden.has_value() && dot(normalized(*hidden), normalized(first)) > 0.999999, "and embeds the same");
+    std::filesystem::remove_all(dir);
+    std::printf("  disk cache: a restarted engine reuses the encoder output\n");
+}
+
 } // namespace
 
 int main() {
@@ -197,6 +237,7 @@ int main() {
         const auto fixtures = Fixtures::load();
         test_embeddings(fixtures, "CPU", 0.9999, 0.9995);
         test_rerank(fixtures, "CPU", 0.002);
+        test_disk_cache(fixtures);
         test_embeddings(fixtures, "GPU", 0.995, 0.98);
         test_rerank(fixtures, "GPU", 0.03);
     } catch (const std::exception &error) {

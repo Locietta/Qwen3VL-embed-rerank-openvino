@@ -74,18 +74,22 @@ std::unique_ptr<service::Worker> start(engine::Kind kind, const service::Config 
     if (!model) return nullptr;
     const auto started = std::chrono::steady_clock::now();
     auto loaded = engine::Engine::load(
-        kind, {
-                  .dir = service::expand_home(config.models_dir) / model->name,
-                  .language_device = model->device,
-                  .vision_device = model->vision_device,
-                  .cache_dir = config.cache_dir.empty() ? std::filesystem::path() : service::expand_home(config.cache_dir),
-                  .length_buckets = config.length_buckets,
-                  .batch_buckets = config.batch_buckets,
-                  .max_batch_tokens = config.max_batch_tokens,
-                  .image_size = config.image_size,
-                  .dynamic_quantization_group = config.dynamic_quantization_group,
-                  .prefix_cache = kind == engine::Kind::RERANKER && config.rerank_prefix_cache,
-              });
+        kind,
+        {
+            .dir = service::expand_home(config.models_dir) / model->name,
+            .language_device = model->device,
+            .vision_device = model->vision_device,
+            .cache_dir = config.cache_dir.empty() ? std::filesystem::path() : service::expand_home(config.cache_dir),
+            .length_buckets = config.length_buckets,
+            .batch_buckets = config.batch_buckets,
+            .max_batch_tokens = config.max_batch_tokens,
+            .image_size = config.image_size,
+            .dynamic_quantization_group = config.dynamic_quantization_group,
+            .prefix_cache = kind == engine::Kind::RERANKER && config.rerank_prefix_cache,
+            .image_cache_bytes = config.image_cache_bytes,
+            .image_cache_dir = config.image_cache_dir.empty() ? std::filesystem::path() : service::expand_home(config.image_cache_dir),
+            .image_cache_disk_bytes = config.image_cache_disk_bytes,
+        });
     if (!loaded) {
         std::fprintf(stderr, "qvl-server: cannot load %s: %s\n", model->name.c_str(), loaded.error().c_str());
         std::exit(1);
