@@ -75,6 +75,18 @@ client ──HTTP──► lighter::http::Server (event loop thread)
     in a byte-bounded LRU (512 MiB, ~256 pictures). The worker looks a picture
     up before decoding it and pins the entry for the job, so a sticker that
     comes back skips both decoding and the encoder.
+    - They also go to disk (`image_cache_dir`), one file per picture
+      (`<key>.bin`, written atomically), under a directory per model, revision
+      and image size. A re-export or another letterbox size never reads
+      stale outputs.
+    - The disk copy survives restarts: after one, 200 stickers came back
+      from disk with no encoder runs. About 2 MiB per picture; pruned
+      oldest-first past 4 GiB.
+    - The prefix's KV state is not saved across calls. Restoring it works on
+      CPU, but the GPU plugin turns `beam_idx` into an indirect KV cache whose
+      hidden beam table a restored state cannot bring back. Without the beam
+      gather, the plugin cannot grow the state at all. So the prefix runs
+      once per batch.
   - Prefix reuse (the reranker, `rerank_prefix_cache`): every pair of a rerank
     request starts with the same system turn, instruction and query.
     - The reranker's language model stays stateful. `split_prefix()` finds the
@@ -145,8 +157,6 @@ driver: no container, no sudo. Models are exported on the host with
 
 ## Next
 
-- Restore the prefix's KV state instead of rerunning it for each batch of a
-  rerank request (`query_state()` / `set_state()`).
 - A per-model switch for dynamic quantization (the reranker tolerates it
   better than stored embeddings would).
 - NPU experiments: the static vision encoder and the reranker are candidates;
